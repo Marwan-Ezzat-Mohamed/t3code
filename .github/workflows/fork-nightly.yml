@@ -59,7 +59,7 @@ jobs:
           notes=""
           [ -n "$last" ] && notes=$(gh release view "$last" --json body --jq .body)
           if [ "${{ inputs.force }}" != "true" ] && echo "$notes" | grep -q "upstream: $upstream_sha" &&
-            echo "$notes" | grep -q "patch: $patch_before"; then
+            echo "$notes" | grep -Eq "patch(-in)?: $patch_before"; then
             echo "Nothing new since $last."
             echo "skip=true" >> "$GITHUB_OUTPUT"
             exit 0
@@ -70,6 +70,7 @@ jobs:
             exit 1
           fi
           echo "upstream_sha=$upstream_sha" >> "$GITHUB_OUTPUT"
+          echo "patch_in=$patch_before" >> "$GITHUB_OUTPUT"
           echo "skip=false" >> "$GITHUB_OUTPUT"
 
       - name: Setup Vite+
@@ -90,8 +91,11 @@ jobs:
           (cd apps/web && vp test run src/components/sidebar/childThreads.logic.test.ts)
           (cd apps/web && vp run typecheck)
 
+      # GITHUB_TOKEN cannot write refs whose commits change upstream's workflow files, so this
+      # may be refused; the next run rebases the same patch again either way.
       - name: Push the rebased branch
         if: steps.sync.outputs.skip != 'true'
+        continue-on-error: true
         run: git push --force-with-lease origin "HEAD:$PATCH_BRANCH"
 
       - name: Build resource monitor
@@ -119,9 +123,12 @@ jobs:
         if: steps.sync.outputs.skip != 'true'
         run: |
           version="${{ steps.build.outputs.version }}"
-          printf 'Sidebar fork of T3 Code nightly.\n\nupstream: %s\npatch: %s\n' \
-            "${{ steps.sync.outputs.upstream_sha }}" "$(git rev-parse HEAD)" > notes.md
-          gh release create "v$version" --prerelease --target "$(git rev-parse HEAD)" \
+          printf 'Sidebar fork of T3 Code nightly.\n\nupstream: %s\npatch-in: %s\npatch: %s\n' \
+            "${{ steps.sync.outputs.upstream_sha }}" "${{ steps.sync.outputs.patch_in }}" \
+            "$(git rev-parse HEAD)" > notes.md
+          # The tag sits on this workflow's commit: one on the app commit would carry upstream's
+          # workflow files, which GITHUB_TOKEN may not write. The updater reads only the assets.
+          gh release create "v$version" --prerelease --target "$GITHUB_SHA" \
             --title "T3 Code fork $version" --notes-file notes.md \
             release/*.exe release/*.blockmap release/nightly.yml
 
