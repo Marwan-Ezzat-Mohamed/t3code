@@ -70,6 +70,7 @@ import {
   SettingsIcon,
 } from "lucide-react";
 import {
+  Fragment,
   useEffect,
   useLayoutEffect,
   useReducer,
@@ -265,6 +266,8 @@ import {
   type SidebarProviderEntry,
   type SidebarSweepAction,
 } from "./sidebar/SidebarThreadRow";
+import { SidebarChildThreads, useSidebarChildFamilies } from "./sidebar/SidebarChildThreads";
+import { groupChildThreadsByParent } from "./sidebar/childThreads.logic";
 import { SidebarDraftBlock } from "./sidebar/SidebarDraftBlock";
 import {
   SidebarProjectFolderHeader,
@@ -327,6 +330,7 @@ const sidebarProviderEntriesAtom = Atom.make((get) => {
 
 const EMPTY_PROVIDER_ENTRIES: ReadonlyMap<string, SidebarProviderEntry> = new Map();
 const EMPTY_THREADS: readonly EnvironmentThreadShell[] = [];
+const EMPTY_CHILD_THREADS: ReadonlyMap<string, ReadonlyArray<EnvironmentThreadShell>> = new Map();
 
 const SETTLED_TAIL_INITIAL_COUNT = 10;
 const SETTLED_TAIL_PAGE_COUNT = 25;
@@ -1118,6 +1122,10 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
             ),
           ),
         );
+  const nestedSubagents = useClientSettings((settings) => settings.sidebarNestedSubagents);
+  const childThreadsByParent = nestedSubagents
+    ? groupChildThreadsByParent(threads, delegatedUnderParent)
+    : EMPTY_CHILD_THREADS;
   const isSearchingThreads = threadSearchQuery.trim().length > 0;
 
   // History, the palette and links can open a thread the scope hides or the list
@@ -1348,6 +1356,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     keepEmptyFolders: (group) =>
       scopedProjectGroups.length > 0 || (group.pinned && !group.archived),
   });
+  useSidebarChildFamilies(orderedThreadKeys, nestedSubagents);
 
   // Ranked across environments as the palette ranks them, so one
   // environment's list does not sit above another's better matches; rows
@@ -3369,104 +3378,116 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                             ? "card"
                             : "slim";
                         return (
-                          <SortableThreadRow
-                            key={threadKey}
-                            sortableId={threadKey}
-                            contextDrag={isContextDrag}
-                            sortableDisabled={
-                              renamingThreadKey === threadKey ||
-                              !draggableThreadKeys.has(threadKey) ||
-                              optimisticDrop !== null
-                            }
-                            thread={thread}
-                            variant={rowVariant}
-                            navigationParent={
-                              folderRow ??
-                              (section === "working" ||
-                              section === "snoozed" ||
-                              section === "settled"
-                                ? `shelf:${section}`
-                                : undefined)
-                            }
-                            variantAction={
-                              section === "snoozed"
-                                ? "unsnooze"
-                                : section === "settled"
-                                  ? "unsettle"
-                                  : "settle"
-                            }
-                            settlementSupported={serverConfigs.has(thread.environmentId)}
-                            snoozeSupported={serverConfigs.has(thread.environmentId)}
-                            pinningSupported={serverConfigs.has(thread.environmentId)}
-                            isPinned={thread.pinnedAt != null}
-                            dropVerb={
-                              dragState?.activeKey === threadKey
-                                ? resolveSidebarDropVerb(dragState.activeSection, dragTargetSection)
-                                : null
-                            }
-                            dragOverPinned={
-                              dragState?.activeKey === threadKey && dragTargetSection === "pinned"
-                            }
-                            sweepAction={
-                              actionSweep?.keys.has(threadKey) ? actionSweep.action : null
-                            }
-                            snoozeWakeLabelText={
-                              section === "snoozed" && thread.snoozedUntil != null
-                                ? snoozeWakeLabel(thread.snoozedUntil, {
-                                    now: new Date().toISOString(),
-                                  })
-                                : null
-                            }
-                            wokeAt={threadWokeAt(thread, { now: snoozeNow })}
-                            isActive={routeRowThreadKey === threadKey}
-                            revealRef={
-                              routeRowThreadKey === threadKey ? revealActiveRow : undefined
-                            }
-                            isRouteThread={routeThreadKey === threadKey}
-                            readOpensPullRequestsInRightPanel={readOpensPullRequestsInRightPanel}
-                            jumpLabel={
-                              showJumpHints ? (jumpLabelByKey.get(threadKey) ?? null) : null
-                            }
-                            currentEnvironmentId={primaryEnvironmentId}
-                            environmentLabel={
-                              environmentLabelById.get(thread.environmentId) ?? null
-                            }
-                            environmentMachine={
-                              environmentMachineById.get(thread.environmentId) ?? "server"
-                            }
-                            scratchMachineLabel={scratchMachineLabelFor(thread)}
-                            project={
-                              projectByKey.get(`${thread.environmentId}:${thread.projectId}`) ??
-                              null
-                            }
-                            projectDisplayName={
-                              projectDisplayNameByKey.get(
-                                `${thread.environmentId}:${thread.projectId}`,
-                              ) ?? null
-                            }
-                            providerEntryByInstanceId={
-                              providerEntriesByEnvironment.get(thread.environmentId) ??
-                              EMPTY_PROVIDER_ENTRIES
-                            }
-                            timestampFormat={timestampFormat}
-                            onThreadClick={handleThreadClick}
-                            onThreadActivate={navigateToThread}
-                            onStartRename={startThreadRename}
-                            onRenameTitleChange={setRenamingTitle}
-                            onCommitRename={commitThreadRename}
-                            onCancelRename={cancelThreadRename}
-                            isRenaming={renamingThreadKey === threadKey}
-                            renamingTitle={renamingThreadKey === threadKey ? renamingTitle : ""}
-                            onContextMenu={handleThreadContextMenu}
-                            onSettle={attemptSettle}
-                            onActionSweepStart={startActionSweep}
-                            onUnsettle={attemptUnsettle}
-                            onSnooze={attemptSnooze}
-                            onUnsnooze={attemptUnsnooze}
-                            onUnpin={attemptUnpin}
-                            onAcknowledgeWoke={acknowledgeWoke}
-                            onFileDropThreads={handleThreadFileDrop}
-                          />
+                          <Fragment key={threadKey}>
+                            <SortableThreadRow
+                              sortableId={threadKey}
+                              contextDrag={isContextDrag}
+                              sortableDisabled={
+                                renamingThreadKey === threadKey ||
+                                !draggableThreadKeys.has(threadKey) ||
+                                optimisticDrop !== null
+                              }
+                              thread={thread}
+                              variant={rowVariant}
+                              navigationParent={
+                                folderRow ??
+                                (section === "working" ||
+                                section === "snoozed" ||
+                                section === "settled"
+                                  ? `shelf:${section}`
+                                  : undefined)
+                              }
+                              variantAction={
+                                section === "snoozed"
+                                  ? "unsnooze"
+                                  : section === "settled"
+                                    ? "unsettle"
+                                    : "settle"
+                              }
+                              settlementSupported={serverConfigs.has(thread.environmentId)}
+                              snoozeSupported={serverConfigs.has(thread.environmentId)}
+                              pinningSupported={serverConfigs.has(thread.environmentId)}
+                              isPinned={thread.pinnedAt != null}
+                              dropVerb={
+                                dragState?.activeKey === threadKey
+                                  ? resolveSidebarDropVerb(
+                                      dragState.activeSection,
+                                      dragTargetSection,
+                                    )
+                                  : null
+                              }
+                              dragOverPinned={
+                                dragState?.activeKey === threadKey && dragTargetSection === "pinned"
+                              }
+                              sweepAction={
+                                actionSweep?.keys.has(threadKey) ? actionSweep.action : null
+                              }
+                              snoozeWakeLabelText={
+                                section === "snoozed" && thread.snoozedUntil != null
+                                  ? snoozeWakeLabel(thread.snoozedUntil, {
+                                      now: new Date().toISOString(),
+                                    })
+                                  : null
+                              }
+                              wokeAt={threadWokeAt(thread, { now: snoozeNow })}
+                              isActive={routeRowThreadKey === threadKey}
+                              revealRef={
+                                routeRowThreadKey === threadKey ? revealActiveRow : undefined
+                              }
+                              isRouteThread={routeThreadKey === threadKey}
+                              readOpensPullRequestsInRightPanel={readOpensPullRequestsInRightPanel}
+                              jumpLabel={
+                                showJumpHints ? (jumpLabelByKey.get(threadKey) ?? null) : null
+                              }
+                              currentEnvironmentId={primaryEnvironmentId}
+                              environmentLabel={
+                                environmentLabelById.get(thread.environmentId) ?? null
+                              }
+                              environmentMachine={
+                                environmentMachineById.get(thread.environmentId) ?? "server"
+                              }
+                              scratchMachineLabel={scratchMachineLabelFor(thread)}
+                              project={
+                                projectByKey.get(`${thread.environmentId}:${thread.projectId}`) ??
+                                null
+                              }
+                              projectDisplayName={
+                                projectDisplayNameByKey.get(
+                                  `${thread.environmentId}:${thread.projectId}`,
+                                ) ?? null
+                              }
+                              providerEntryByInstanceId={
+                                providerEntriesByEnvironment.get(thread.environmentId) ??
+                                EMPTY_PROVIDER_ENTRIES
+                              }
+                              timestampFormat={timestampFormat}
+                              onThreadClick={handleThreadClick}
+                              onThreadActivate={navigateToThread}
+                              onStartRename={startThreadRename}
+                              onRenameTitleChange={setRenamingTitle}
+                              onCommitRename={commitThreadRename}
+                              onCancelRename={cancelThreadRename}
+                              isRenaming={renamingThreadKey === threadKey}
+                              renamingTitle={renamingThreadKey === threadKey ? renamingTitle : ""}
+                              onContextMenu={handleThreadContextMenu}
+                              onSettle={attemptSettle}
+                              onActionSweepStart={startActionSweep}
+                              onUnsettle={attemptUnsettle}
+                              onSnooze={attemptSnooze}
+                              onUnsnooze={attemptUnsnooze}
+                              onUnpin={attemptUnpin}
+                              onAcknowledgeWoke={acknowledgeWoke}
+                              onFileDropThreads={handleThreadFileDrop}
+                            />
+                            {nestedSubagents ? (
+                              <SidebarChildThreads
+                                parentKey={threadKey}
+                                childrenByParent={childThreadsByParent}
+                                routeThreadKey={routeThreadKey}
+                                onOpen={navigateToThread}
+                              />
+                            ) : null}
+                          </Fragment>
                         );
                       };
                       const from = isContextDrag ? null : (dragState?.activeSection ?? null);

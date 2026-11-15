@@ -466,6 +466,12 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["hide fold running monitoring threads inbox sidebar shelf"],
   },
   {
+    id: "nested-subagents",
+    title: msg("Subagents under their parent"),
+    to: "/settings/general",
+    searchTerms: ["nested child delegated agents sidebar tree lineage"],
+  },
+  {
     id: "boring-sidebar",
     title: "Boring sidebar (group by project)",
     to: "/settings/labs",
