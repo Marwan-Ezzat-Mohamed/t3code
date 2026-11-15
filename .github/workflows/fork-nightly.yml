@@ -1,0 +1,132 @@
+# Keeps the sidebar patch on top of upstream T3 Code and publishes a Windows nightly that
+# the desktop app's own updater installs. Lives on the default branch (fork-ci) so the
+# schedule runs; the app code lives on feat/nested-sidebar-subagents.
+name: Fork nightly
+
+on:
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Build even when upstream and the patch are unchanged
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: fork-nightly
+  cancel-in-progress: false
+
+env:
+  PATCH_BRANCH: feat/nested-sidebar-subagents
+  UPSTREAM: https://github.com/pingdotgg/t3code.git
+  GH_TOKEN: ${{ github.token }}
+  # The upstream remote makes gh's repo guess ambiguous.
+  GH_REPO: ${{ github.repository }}
+
+jobs:
+  nightly:
+    runs-on: windows-2025
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout patch branch
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          ref: ${{ env.PATCH_BRANCH }}
+          fetch-depth: 0
+          filter: blob:none
+          sparse-checkout: |
+            /*
+            !/.repos/
+          sparse-checkout-cone-mode: false
+
+      - name: Rebase onto upstream
+        id: sync
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream "$UPSTREAM"
+          git fetch -q --filter=blob:none upstream main
+          upstream_sha=$(git rev-parse upstream/main)
+          patch_before=$(git rev-parse HEAD)
+          last=$(gh release list --limit 1 --json tagName --jq '.[0].tagName // ""')
+          notes=""
+          [ -n "$last" ] && notes=$(gh release view "$last" --json body --jq .body)
+          if [ "${{ inputs.force }}" != "true" ] && echo "$notes" | grep -q "upstream: $upstream_sha" &&
+            echo "$notes" | grep -q "patch: $patch_before"; then
+            echo "Nothing new since $last."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if ! git rebase upstream/main; then
+            git rebase --abort
+            echo "::error::The sidebar patch conflicts with upstream main. Rebase $PATCH_BRANCH by hand; installed apps keep the last release."
+            exit 1
+          fi
+          echo "upstream_sha=$upstream_sha" >> "$GITHUB_OUTPUT"
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Vite+
+        if: steps.sync.outputs.skip != 'true'
+        uses: voidzero-dev/setup-vp@250f29ce396baf5e8f24498e17c0dfdebabc26eb # v1.15.0
+        with:
+          node-version-file: package.json
+          cache: false
+          run-install: false
+
+      - name: Install
+        if: steps.sync.outputs.skip != 'true'
+        run: vp install
+
+      - name: Check the patch
+        if: steps.sync.outputs.skip != 'true'
+        run: |
+          (cd apps/web && vp test run src/components/sidebar/childThreads.logic.test.ts)
+          (cd apps/web && vp run typecheck)
+
+      - name: Push the rebased branch
+        if: steps.sync.outputs.skip != 'true'
+        run: git push --force-with-lease origin "HEAD:$PATCH_BRANCH"
+
+      - name: Build resource monitor
+        if: steps.sync.outputs.skip != 'true'
+        run: cargo build --locked --release --manifest-path native/resource-monitor/Cargo.toml --target x86_64-pc-windows-msvc
+
+      # Upstream packages Windows on Linux, which skips the bytecode cache; on Windows it adds
+      # files past the payload limit, so the untrusted-bundle switch skips it the same way.
+      - name: Build installer
+        if: steps.sync.outputs.skip != 'true'
+        id: build
+        env:
+          T3CODE_DESKTOP_REUSE_RESOURCE_MONITOR: "1"
+          T3CODE_DESKTOP_UNTRUSTED_BUNDLE: "true"
+          T3CODE_DESKTOP_UPDATE_REPOSITORY: ${{ github.repository }}
+        run: |
+          base=$(git tag --list 'v*-nightly.*' --merged upstream/main --sort=-creatordate | head -1 | sed -E 's/^v([^-]+)-.*/\1/')
+          [ -n "$base" ] || base=$(node -p "require('./apps/desktop/package.json').version.split('-')[0]")
+          version="$base-nightly.$(date -u +%Y%m%d).$(date -u +%H%M)"
+          node scripts/build-desktop-artifact.ts --platform win --target nsis --arch x64 \
+            --build-version "$version" --output-dir release
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Publish release
+        if: steps.sync.outputs.skip != 'true'
+        run: |
+          version="${{ steps.build.outputs.version }}"
+          printf 'Sidebar fork of T3 Code nightly.\n\nupstream: %s\npatch: %s\n' \
+            "${{ steps.sync.outputs.upstream_sha }}" "$(git rev-parse HEAD)" > notes.md
+          gh release create "v$version" --prerelease --target "$(git rev-parse HEAD)" \
+            --title "T3 Code fork $version" --notes-file notes.md \
+            release/*.exe release/*.blockmap release/nightly.yml
+
+      - name: Keep the newest five releases
+        if: steps.sync.outputs.skip != 'true'
+        run: |
+          gh release list --limit 100 --json tagName,createdAt --jq 'sort_by(.createdAt) | reverse | .[5:] | .[].tagName' |
+            while read -r tag; do gh release delete "$tag" --cleanup-tag --yes; done
